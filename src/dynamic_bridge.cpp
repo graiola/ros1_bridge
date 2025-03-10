@@ -254,7 +254,7 @@ void update_bridge(
     bridge.ros1_type_name = ros1_type_name;
     bridge.ros2_type_name = ros2_type_name;
 
-    auto ros2_subscriber_qos = rclcpp::QoS(rclcpp::KeepLast(10));
+    auto ros2_subscriber_qos = rclcpp::SensorDataQoS(rclcpp::KeepLast(10));
     auto ros_publisher_latch = false;
     if (topic_name == "/tf_static") {
       ros2_subscriber_qos.keep_all();
@@ -268,6 +268,8 @@ void update_bridge(
         ros2_node, ros1_node,
         bridge.ros2_type_name, topic_name, ros2_subscriber_qos,
         bridge.ros1_type_name, topic_name, 10, ros_publisher_latch);
+        //bridge.ros2_type_name, topic_name, 10,
+        //bridge.ros1_type_name, topic_name, 10);
     } catch (std::runtime_error & e) {
       fprintf(
         stderr,
