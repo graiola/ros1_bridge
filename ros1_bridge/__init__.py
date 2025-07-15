@@ -28,6 +28,7 @@ from rosidl_cmake import expand_template
 import rosidl_parser.parser
 
 import yaml
+from typing import List, Tuple, Set
 
 # import rospkg which is required by rosmsg
 # and likely only available for Python 2
@@ -63,6 +64,57 @@ for package_path in reversed([p for p in rpp if p]):
             sys.path.remove(sys_path)
             sys.path.insert(0, sys_path)
 import rosmsg  # noqa
+
+class Message:
+    __slots__ = [
+        'package_name',
+        'message_name',
+        'prefix_path'
+    ]
+
+    def __init__(self, package_name, message_name, prefix_path=None):
+        self.package_name = package_name
+        self.message_name = message_name
+        self.prefix_path = prefix_path
+
+    def __eq__(self, other):
+        return self.package_name == other.package_name and \
+            self.message_name == other.message_name
+
+    def __hash__(self):
+        return hash('%s/%s' % (self.package_name, self.message_name))
+
+    def __str__(self):
+        return self.prefix_path + ':' + self.package_name + ':' + self.message_name
+
+    def __repr__(self):
+        return self.__str__()
+
+class MappingRule:
+    __slots__ = [
+        'ros1_package_name',
+        'ros2_package_name',
+        'package_mapping'
+    ]
+
+    def __init__(self, data, expected_package_name):
+        if all(n in data for n in ('ros1_package_name', 'ros2_package_name')):
+            if data['ros2_package_name'] != expected_package_name:
+                raise Exception(
+                    ('Ignoring rule which affects a different ROS 2 package (%s) '
+                     'then the one it is defined in (%s)') %
+                    (data['ros2_package_name'], expected_package_name))
+            self.ros1_package_name = data['ros1_package_name']
+            self.ros2_package_name = data['ros2_package_name']
+            self.package_mapping = (len(data) == 2)
+        else:
+            raise Exception('Ignoring a rule without a ros1_package_name and/or ros2_package_name')
+
+    def is_package_mapping(self):
+        return self.package_mapping
+
+    def __repr__(self):
+        return self.__str__()
 
 
 def generate_cpp(output_path, template_dir):
@@ -158,23 +210,76 @@ def generate_cpp(output_path, template_dir):
                     (ros2_package_name, interface_type, interface.message_name))
                 expand_template(template_file, data_idl_cpp, output_file)
 
+def determine_service_pairs(
+    ros1_srvs: List[Message],
+    ros2_srvs: List[Message],
+    package_pairs: Set[Tuple[str, str]],
+    mapping_rules: List[MappingRule]
+) -> List[Tuple[Message, Message]]:
+    """
+    Return list of (ros1_srv, ros2_srv) pairs that should be bridged.
+
+    Matching criteria:
+      - ros1 and ros2 service packages are in package_pairs
+      - service names correspond, based on mapping_rules if provided
+    """
+    pairs = []
+    # Build lookup for ROS2 services keyed by (pkg, name)
+    ros2_index = {
+        (srv.package_name, srv.message_name): srv
+        for srv in ros2_srvs
+    }
+
+    for ros1_srv in ros1_srvs:
+        ros1_pkg = ros1_srv.package_name
+        ros1_name = ros1_srv.message_name
+
+        # Check mapping_rules for service-specific override
+        for rule in mapping_rules:
+            if (hasattr(rule, 'ros1_service_name') and
+                rule.ros1_package_name == ros1_pkg and
+                rule.ros1_service_name == ros1_name):
+                ros2_pkg = rule.ros2_package_name
+                ros2_name = rule.ros2_service_name
+                ros2_srv = ros2_index.get((ros2_pkg, ros2_name))
+                if ros2_srv:
+                    pairs.append((ros1_srv, ros2_srv))
+                break
+        else:
+            # No explicit rule—match same package pair and same service name
+            for ros2_pkg, ros2_name in package_pairs:
+                if ros1_pkg == ros2_pkg and ros1_name == ros2_name:
+                    ros2_srv = ros2_index.get((ros2_pkg, ros2_name))
+                    if ros2_srv:
+                        pairs.append((ros1_srv, ros2_srv))
+                    break
+
+    return pairs
+
 
 def generate_messages(rospack=None):
+    # discover topic messages
     ros1_msgs = get_ros1_messages(rospack=rospack)
     ros2_package_names, ros2_msgs, mapping_rules = get_ros2_messages()
 
     package_pairs = determine_package_pairs(ros1_msgs, ros2_msgs, mapping_rules)
     message_pairs = determine_message_pairs(ros1_msgs, ros2_msgs, package_pairs, mapping_rules)
 
+    # now also discover services
+    ros1_srvs = get_ros1_services(rospack=rospack)
+    ros2_srvs = get_ros2_services()[1]  # second element is list of services
+    service_pairs = determine_service_pairs(ros1_srvs, ros2_srvs, package_pairs, mapping_rules)
+
+    # include service request/response types
+    for ros1_srv, ros2_srv in service_pairs:
+        message_pairs.append((ros1_srv.request, ros2_srv.request))
+        message_pairs.append((ros1_srv.response, ros2_srv.response))
+
     mappings = []
-    # add custom mapping for builtin_interfaces
+    # builtin_interfaces mapping as before...
     for msg_name in ('Duration', 'Time'):
-        ros1_msg = [
-            m for m in ros1_msgs
-            if m.package_name == 'std_msgs' and m.message_name == msg_name]
-        ros2_msg = [
-            m for m in ros2_msgs
-            if m.package_name == 'builtin_interfaces' and m.message_name == msg_name]
+        ros1_msg = [m for m in ros1_msgs if m.package_name == 'std_msgs' and m.message_name == msg_name]
+        ros2_msg = [m for m in ros2_msgs if m.package_name == 'builtin_interfaces' and m.message_name == msg_name]
         if ros1_msg and ros2_msg:
             mappings.append(Mapping(ros1_msg[0], ros2_msg[0]))
 
@@ -183,38 +288,33 @@ def generate_messages(rospack=None):
         msg_idx.ros1_put(ros1_msg)
         msg_idx.ros2_put(ros2_msg)
 
+    # field mappings including new service types
     for ros1_msg, ros2_msg in message_pairs:
         mapping = determine_field_mapping(ros1_msg, ros2_msg, mapping_rules, msg_idx)
         if mapping:
             mappings.append(mapping)
 
-    # order mappings topologically to allow template specialization
+    # topological ordering
     ordered_mappings = []
     while mappings:
-        # pick first mapping without unsatisfied dependencies
         for m in mappings:
             if not m.depends_on_ros2_messages:
                 break
         else:
             break
-        # move mapping to ordered list
         mappings.remove(m)
         ordered_mappings.append(m)
-        ros2_msg = m.ros2_msg
-        # update unsatisfied dependencies of remaining mappings
-        for m in mappings:
-            if ros2_msg in m.depends_on_ros2_messages:
-                m.depends_on_ros2_messages.remove(ros2_msg)
+        for other in mappings:
+            if m.ros2_msg in other.depends_on_ros2_messages:
+                other.depends_on_ros2_messages.remove(m.ros2_msg)
 
     if mappings:
-        print('%d mappings can not be generated due to missing dependencies:' % len(mappings),
-              file=sys.stderr)
+        print(f"{len(mappings)} mappings cannot be generated due to missing dependencies:", file=sys.stderr)
         for m in mappings:
-            print('- %s <-> %s:' %
-                  ('%s/%s' % (m.ros1_msg.package_name, m.ros1_msg.message_name),
-                   '%s/%s' % (m.ros2_msg.package_name, m.ros2_msg.message_name)), file=sys.stderr)
+            print(f"- {m.ros1_msg.package_name}/{m.ros1_msg.message_name} ↔ "
+                  f"{m.ros2_msg.package_name}/{m.ros2_msg.message_name}", file=sys.stderr)
             for d in m.depends_on_ros2_messages:
-                print('  -', '%s/%s' % (d.package_name, d.message_name), file=sys.stderr)
+                print("   - depends on", f"{d.package_name}/{d.message_name}", file=sys.stderr)
         print(file=sys.stderr)
 
     return {
@@ -224,6 +324,7 @@ def generate_messages(rospack=None):
         'ros2_package_names_msg': ros2_package_names,
         'all_ros2_msgs': ros2_msgs,
     }
+
 
 
 def generate_services(rospack=None, message_string_pairs=None):
@@ -344,60 +445,6 @@ def get_ros2_services():
                     except Exception as e:
                         print('%s' % str(e), file=sys.stderr)
     return pkgs, srvs, rules
-
-
-class Message:
-    __slots__ = [
-        'package_name',
-        'message_name',
-        'prefix_path'
-    ]
-
-    def __init__(self, package_name, message_name, prefix_path=None):
-        self.package_name = package_name
-        self.message_name = message_name
-        self.prefix_path = prefix_path
-
-    def __eq__(self, other):
-        return self.package_name == other.package_name and \
-            self.message_name == other.message_name
-
-    def __hash__(self):
-        return hash('%s/%s' % (self.package_name, self.message_name))
-
-    def __str__(self):
-        return self.prefix_path + ':' + self.package_name + ':' + self.message_name
-
-    def __repr__(self):
-        return self.__str__()
-
-
-class MappingRule:
-    __slots__ = [
-        'ros1_package_name',
-        'ros2_package_name',
-        'package_mapping'
-    ]
-
-    def __init__(self, data, expected_package_name):
-        if all(n in data for n in ('ros1_package_name', 'ros2_package_name')):
-            if data['ros2_package_name'] != expected_package_name:
-                raise Exception(
-                    ('Ignoring rule which affects a different ROS 2 package (%s) '
-                     'then the one it is defined in (%s)') %
-                    (data['ros2_package_name'], expected_package_name))
-            self.ros1_package_name = data['ros1_package_name']
-            self.ros2_package_name = data['ros2_package_name']
-            self.package_mapping = (len(data) == 2)
-        else:
-            raise Exception('Ignoring a rule without a ros1_package_name and/or ros2_package_name')
-
-    def is_package_mapping(self):
-        return self.package_mapping
-
-    def __repr__(self):
-        return self.__str__()
-
 
 class MessageMappingRule(MappingRule):
     __slots__ = [
@@ -526,6 +573,8 @@ def determine_message_pairs(ros1_msgs, ros2_msgs, package_pairs, mapping_rules):
 
     # add manual message mapping rules
     for rule in mapping_rules:
+        if not hasattr(rule, 'ros1_message_name'):
+            continue
         if not rule.is_message_mapping():
             continue
         for ros1_msg in ros1_msgs:
