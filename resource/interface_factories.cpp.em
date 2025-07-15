@@ -310,25 +310,34 @@ void ServiceFactory<
     @(field["ros1"]["name"])1_it != req1.@(field["ros1"]["name"]).end() &&
     @(field["ros2"]["name"])2_it != req2.@(field["ros2"]["name"]).end()
   ) {
+    @[ if field["ros1"].get("cpp_type") == "bool" or field["ros2"].get("cpp_type") == "bool" or field["ros1"].get("type") == "bool" or field["ros2"].get("type") == "bool"]@
+    auto @(field["ros1"]["name"])1 = *(@(field["ros1"]["name"])1_it++);
+    auto @(field["ros2"]["name"])2 = *(@(field["ros2"]["name"])2_it++);
+@[ else ]@
     auto & @(field["ros1"]["name"])1 = *(@(field["ros1"]["name"])1_it++);
     auto & @(field["ros2"]["name"])2 = *(@(field["ros2"]["name"])2_it++);
-@[      else]@
+@[ end if ]@
+@[        if field["basic"]]@
+    @(field["ros2"]["name"])@(to) = @(field["ros1"]["name"])@(frm);
+@[        else]@
+    Factory<@(field["ros1"]["cpptype"]), @(field["ros2"]["cpptype"])> ::convert_@(frm)_to_@(to)(
+      @(field["ros2"]["name"])@(frm), @(field["ros1"]["name"])@(to));
+@[        end if]@
+  }
+@[        else]@
   auto & @(field["ros1"]["name"])1 = req1.@(field["ros1"]["name"]);
   auto & @(field["ros2"]["name"])2 = req2.@(field["ros2"]["name"]);
-@[        end if]@
 @[        if field["basic"]]@
   @(field["ros2"]["name"])@(to) = @(field["ros1"]["name"])@(frm);
 @[        else]@
-  Factory<@(field["ros1"]["cpptype"]),@(field["ros2"]["cpptype"])>::convert_@(frm)_to_@(to)(@
-@(field["ros2"]["name"])@(frm), @(field["ros1"]["name"])@(to));
+  Factory<@(field["ros1"]["cpptype"]), @(field["ros2"]["cpptype"])> ::convert_@(frm)_to_@(to)(
+    @(field["ros2"]["name"])@(frm), @(field["ros1"]["name"])@(to));
 @[        end if]@
-@[        if field["array"]]@
-  }
 @[        end if]@
 @[      end for]@
 }
-
 @[    end for]@
 @[  end for]@
 @[end for]@
+
 }  // namespace ros1_bridge
