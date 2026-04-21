@@ -4,10 +4,9 @@ import argparse
 import fnmatch
 import json
 import os
-import sys
 import time
 import xmlrpc.client
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import rclpy
 from rclpy.node import Node
@@ -84,26 +83,23 @@ def normalize_ros2_param_name(
     """
     Convert a ROS1 parameter path into a ROS2 parameter name.
 
-    The expected symmetric case is:
+    Symmetric case:
       target_node = /ras_1/wolf_controller
       ros1_param_name = /ras_1/wolf_controller/robot_foot_names
     -> robot_foot_names
 
-    Another example:
       /ras_1/wolf_controller/planner/max_vel
     -> planner.max_vel   (unless keep_slashes=True)
-
-    If the ROS1 param is outside the target node namespace, we still normalize it.
     """
     mapping = mapping or {}
 
-    # Prefer mapping on relative suffix when possible
     relative = ros1_param_name
     target_prefix = target_node.rstrip("/")
+
     if target_prefix and ros1_param_name == target_prefix:
         relative = ""
     elif target_prefix and ros1_param_name.startswith(target_prefix + "/"):
-        relative = ros1_param_name[len(target_prefix) + 1 :]
+        relative = ros1_param_name[len(target_prefix) + 1:]
 
     relative = relative.strip("/")
 
@@ -183,7 +179,6 @@ def python_value_to_parameter_value(value: Any) -> ParameterValue:
             pv.string_array_value = [str(v) for v in value]
             return pv
 
-        # Mixed arrays are not valid ROS2 parameter arrays
         pv.type = ParameterType.PARAMETER_STRING
         pv.string_value = json.dumps(value)
         return pv
@@ -315,10 +310,11 @@ def wait_for_matching_target_nodes(
         last_seen = get_full_node_names(node)
         time.sleep(poll_period_sec)
 
-    raise RuntimeError(
+    node.get_logger().warning(
         f"No ROS2 target nodes matched pattern '{pattern}' within {timeout_sec:.1f}s. "
         f"Visible nodes at timeout: {last_seen}"
     )
+    return []
 
 
 def resolve_ros1_param_names_for_target(
@@ -434,6 +430,12 @@ def main(argv=None):
             pattern=args.target_node,
             timeout_sec=args.timeout,
         )
+
+        if not target_nodes:
+            node.get_logger().warning(
+                f"Skipping sync because no ROS2 target nodes matched '{args.target_node}'"
+            )
+            return 0
 
         node.get_logger().info(
             "Matched target node(s): " + ", ".join(target_nodes)

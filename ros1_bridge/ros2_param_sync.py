@@ -167,16 +167,6 @@ def expand_optional_namespace_patterns(pattern: str) -> List[str]:
     Allow each '/*/' segment to match either:
       - one namespace level
       - zero namespace levels
-
-    Examples:
-      /*/wolf_controller
-        -> /*/wolf_controller
-        -> /wolf_controller
-
-      /*/*/wolf_controller
-        -> /*/*/wolf_controller
-        -> /*/wolf_controller
-        -> /wolf_controller
     """
     candidate_patterns = {pattern}
     queue = [pattern]
@@ -234,7 +224,7 @@ def wait_for_matching_source_nodes(
 ) -> List[str]:
     """
     Wait until at least one ROS2 node matches the source pattern.
-    This helps when the node graph is not populated yet even though ROS is up.
+    Return an empty list on timeout instead of raising, so callers can warn and continue.
     """
     deadline = time.monotonic() + timeout_sec
     last_seen: List[str] = []
@@ -249,10 +239,11 @@ def wait_for_matching_source_nodes(
         last_seen = get_full_node_names(node)
         time.sleep(poll_period_sec)
 
-    raise RuntimeError(
+    node.get_logger().warning(
         f"No ROS2 nodes matched source pattern '{pattern}' within {timeout_sec:.1f}s. "
         f"Visible nodes at timeout: {last_seen}"
     )
+    return []
 
 
 def list_ros2_parameters(
@@ -401,6 +392,12 @@ def main(argv=None):
             pattern=args.source_node,
             timeout_sec=args.timeout,
         )
+
+        if not source_nodes:
+            node.get_logger().warning(
+                f"Skipping sync because no ROS2 source nodes matched '{args.source_node}'"
+            )
+            return 0
 
         node.get_logger().info(
             "Matched source node(s): " + ", ".join(source_nodes)
